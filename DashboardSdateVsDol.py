@@ -3,20 +3,26 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 
-st.set_page_config(page_title="Claim Portfolio Dashboard", layout="wide")
+# ===============================
+# PAGE CONFIG
+# ===============================
+st.set_page_config(
+    page_title="Claim Loss Timing Dashboard",
+    layout="wide"
+)
 
-st.title("📊 Claim Portfolio & Loss Timing Dashboard")
+st.title("📊 Claim Loss Timing & Cause Analysis")
 
 # ===============================
 # UPLOAD DATA
 # ===============================
 uploaded_file = st.file_uploader(
-    "Upload Excel data (template standar)",
+    "Upload Excel Data Klaim",
     type=["xlsx"]
 )
 
 if uploaded_file is None:
-    st.info("Silakan upload file Excel untuk memulai analisis.")
+    st.info("Silakan upload file Excel untuk memulai.")
     st.stop()
 
 df_raw = pd.read_excel(uploaded_file)
@@ -25,7 +31,22 @@ st.subheader("📄 Preview Data Mentah")
 st.dataframe(df_raw.head())
 
 # ===============================
-# DATA VALIDATION
+# COLUMN MAPPING (ADAPTIF KE EXCEL USER)
+# ===============================
+COLUMN_MAPPING = {
+    "Kode okupasi": "Kode Okupasi",
+    "kode okupasi": "Kode Okupasi",
+    "Kategori Okupasi": "Kategori Risiko",
+    "kategori okupasi": "Kategori Risiko",
+    "EDate": "End Date",
+    "Edate": "End Date",
+    "COB": "Channel Business"
+}
+
+df_raw = df_raw.rename(columns=COLUMN_MAPPING)
+
+# ===============================
+# REQUIRED & OPTIONAL COLUMNS
 # ===============================
 REQUIRED_COLS = [
     "Nomor klaim",
@@ -38,7 +59,8 @@ REQUIRED_COLS = [
 OPTIONAL_COLS = [
     "Kode Okupasi",
     "Occupancy",
-    "Kategori Risiko"
+    "Kategori Risiko",
+    "Channel Business"
 ]
 
 missing_required = [c for c in REQUIRED_COLS if c not in df_raw.columns]
@@ -51,27 +73,25 @@ if missing_required:
 # DATA CLEANING
 # ===============================
 df = df_raw.copy()
+initial_rows = len(df)
 
-# Convert date columns
+# Date parsing
 df["StartDate"] = pd.to_datetime(df["StartDate"], errors="coerce")
 df["Date of Loss"] = pd.to_datetime(df["Date of Loss"], errors="coerce")
 
-initial_rows = len(df)
-
 # Drop missing critical
 df = df.dropna(subset=REQUIRED_COLS)
+after_drop = len(df)
 
-after_drop_rows = len(df)
-
-# Fill optional columns
+# Optional columns handling
 for col in OPTIONAL_COLS:
-    if col in df.columns:
-        df[col] = df[col].fillna("UNKNOWN")
+    if col not in df.columns:
+        df[col] = "ALL"
     else:
-        df[col] = "UNKNOWN"
+        df[col] = df[col].fillna("UNKNOWN")
 
 # ===============================
-# DEDUPLICATION
+# DEDUPLICATION (1 Nomor Klaim = 1 Loss)
 # ===============================
 df = (
     df
@@ -83,11 +103,12 @@ df = (
         "Cause of Loss": "first",
         "Kode Okupasi": "first",
         "Occupancy": "first",
-        "Kategori Risiko": "first"
+        "Kategori Risiko": "first",
+        "Channel Business": "first"
     })
 )
 
-after_dedup_rows = len(df)
+after_dedup = len(df)
 
 # ===============================
 # FEATURE ENGINEERING
@@ -109,42 +130,36 @@ def loss_bucket(x):
 
 df["Loss Timing Bucket"] = df["Loss Lag Months"].apply(loss_bucket)
 
+df["UY"] = df["StartDate"].dt.year.astype(str)
+
 # ===============================
 # DATA QUALITY SUMMARY
 # ===============================
 st.subheader("⚠️ Data Quality Summary")
-col1, col2, col3 = st.columns(3)
-col1.metric("Total Baris Awal", initial_rows)
-col2.metric("Baris Setelah Cleaning", after_drop_rows)
-col3.metric("Klaim Unik (Final)", after_dedup_rows)
+c1, c2, c3 = st.columns(3)
+c1.metric("Total Baris Awal", initial_rows)
+c2.metric("Setelah Cleaning", after_drop)
+c3.metric("Klaim Unik Dianalisis", after_dedup)
 
 # ===============================
-# FILTERS
+# SIDEBAR FILTERS
 # ===============================
 st.sidebar.header("🔍 Filter Data")
 
-filter_okupasi = st.sidebar.multiselect(
-    "Kode Okupasi",
-    sorted(df["Kode Okupasi"].unique()),
-    default=df["Kode Okupasi"].unique()
-)
+def safe_multiselect(label, col):
+    values = sorted(df[col].unique())
+    return st.sidebar.multiselect(label, values, default=values)
 
-filter_occupancy = st.sidebar.multiselect(
-    "Occupancy",
-    sorted(df["Occupancy"].unique()),
-    default=df["Occupancy"].unique()
-)
-
-filter_risk = st.sidebar.multiselect(
-    "Kategori Risiko",
-    sorted(df["Kategori Risiko"].unique()),
-    default=df["Kategori Risiko"].unique()
-)
+filter_risk = safe_multiselect("Kategori Risiko", "Kategori Risiko")
+filter_occ = safe_multiselect("Occupancy", "Occupancy")
+filter_col = safe_multiselect("Cause of Loss", "Cause of Loss")
+filter_ch = safe_multiselect("Channel Business", "Channel Business")
 
 df_f = df[
-    (df["Kode Okupasi"].isin(filter_okupasi)) &
-    (df["Occupancy"].isin(filter_occupancy)) &
-    (df["Kategori Risiko"].isin(filter_risk))
+    (df["Kategori Risiko"].isin(filter_risk)) &
+    (df["Occupancy"].isin(filter_occ)) &
+    (df["Cause of Loss"].isin(filter_col)) &
+    (df["Channel Business"].isin(filter_ch))
 ]
 
 # ===============================
@@ -152,9 +167,8 @@ df_f = df[
 # ===============================
 st.subheader("📈 Loss Timing Analysis")
 
-col1, col2 = st.columns(2)
+left, right = st.columns(2)
 
-# Frequency by loss timing
 freq = (
     df_f
     .groupby("Loss Timing Bucket")
@@ -169,9 +183,8 @@ fig_freq = px.bar(
     title="Frekuensi Klaim berdasarkan Loss Timing"
 )
 
-col1.plotly_chart(fig_freq, use_container_width=True)
+left.plotly_chart(fig_freq, use_container_width=True)
 
-# Amount by loss timing
 amt = (
     df_f
     .groupby("Loss Timing Bucket")["Claim Amount"]
@@ -186,16 +199,15 @@ fig_amt = px.bar(
     title="Amount Klaim berdasarkan Loss Timing"
 )
 
-col2.plotly_chart(fig_amt, use_container_width=True)
+right.plotly_chart(fig_amt, use_container_width=True)
 
 # ===============================
 # CAUSE OF LOSS CONTRIBUTION
 # ===============================
 st.subheader("🎯 Cause of Loss Contribution")
 
-col3, col4 = st.columns(2)
+c3, c4 = st.columns(2)
 
-# Frequency contribution
 cause_freq = (
     df_f
     .groupby("Cause of Loss")
@@ -203,18 +215,19 @@ cause_freq = (
     .reset_index(name="Frekuensi")
 )
 
-cause_freq["% Kontribusi"] = cause_freq["Frekuensi"] / cause_freq["Frekuensi"].sum() * 100
+cause_freq["% Kontribusi"] = (
+    cause_freq["Frekuensi"] / cause_freq["Frekuensi"].sum() * 100
+)
 
 fig_cf = px.pie(
     cause_freq,
     names="Cause of Loss",
     values="% Kontribusi",
-    title="% Kontribusi Frekuensi by Cause of Loss"
+    title="% Kontribusi Frekuensi"
 )
 
-col3.plotly_chart(fig_cf, use_container_width=True)
+c3.plotly_chart(fig_cf, use_container_width=True)
 
-# Amount contribution
 cause_amt = (
     df_f
     .groupby("Cause of Loss")["Claim Amount"]
@@ -222,19 +235,21 @@ cause_amt = (
     .reset_index()
 )
 
-cause_amt["% Kontribusi"] = cause_amt["Claim Amount"] / cause_amt["Claim Amount"].sum() * 100
+cause_amt["% Kontribusi"] = (
+    cause_amt["Claim Amount"] / cause_amt["Claim Amount"].sum() * 100
+)
 
 fig_ca = px.pie(
     cause_amt,
     names="Cause of Loss",
     values="% Kontribusi",
-    title="% Kontribusi Amount by Cause of Loss"
+    title="% Kontribusi Amount"
 )
 
-col4.plotly_chart(fig_ca, use_container_width=True)
+c4.plotly_chart(fig_ca, use_container_width=True)
 
 # ===============================
 # FINAL TABLE
 # ===============================
-st.subheader("📋 Data Klaim Final (Setelah Cleaning)")
+st.subheader("📋 Data Klaim (Final)")
 st.dataframe(df_f)
