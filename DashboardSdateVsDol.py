@@ -1,233 +1,240 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+import plotly.express as px
 
-# =====================================================
-# PAGE CONFIG
-# =====================================================
-st.set_page_config(
-    page_title="Bundling Rate Calculator",
-    layout="wide"
+st.set_page_config(page_title="Claim Portfolio Dashboard", layout="wide")
+
+st.title("📊 Claim Portfolio & Loss Timing Dashboard")
+
+# ===============================
+# UPLOAD DATA
+# ===============================
+uploaded_file = st.file_uploader(
+    "Upload Excel data (template standar)",
+    type=["xlsx"]
 )
 
-st.title("📊 Bundling Rate Calculator")
-st.caption("by Divisi Aktuaria Askrindo")
+if uploaded_file is None:
+    st.info("Silakan upload file Excel untuk memulai analisis.")
+    st.stop()
 
-# =====================================================
-# LOAD DATA
-# =====================================================
-@st.cache_data(show_spinner="Loading rate matrix...")
-def load_rate_matrix(path):
-    df = pd.read_excel(path)
-    df.columns = df.columns.str.strip()
-    return df
+df_raw = pd.read_excel(uploaded_file)
 
-df_rate = load_rate_matrix("rate_matrix_produk.xlsx")
+st.subheader("📄 Preview Data Mentah")
+st.dataframe(df_raw.head())
 
-# =====================================================
-# CORE ENGINE
-# =====================================================
-def get_rate(df, coverage, subcover, selected_factors):
+# ===============================
+# DATA VALIDATION
+# ===============================
+REQUIRED_COLS = [
+    "Nomor klaim",
+    "StartDate",
+    "Date of Loss",
+    "Claim Amount",
+    "Cause of Loss"
+]
 
-    q = (df["Coverage"] == coverage) & (df["Subcover"] == subcover)
+OPTIONAL_COLS = [
+    "Kode Okupasi",
+    "Occupancy",
+    "Kategori Risiko"
+]
 
-    for col, val in selected_factors.items():
-        q &= (
-            (df[col].astype(str) == str(val)) |
-            (df[col].isna())
-        )
+missing_required = [c for c in REQUIRED_COLS if c not in df_raw.columns]
 
-    result = df[q].copy()
+if missing_required:
+    st.error(f"Kolom wajib tidak ditemukan: {missing_required}")
+    st.stop()
 
-    if result.empty:
-        raise ValueError(f"Rate tidak ditemukan: {coverage} - {subcover}")
+# ===============================
+# DATA CLEANING
+# ===============================
+df = df_raw.copy()
 
-    factor_cols = [
-        c for c in df.columns
-        if c not in ["Coverage", "Subcover", "Rate"]
-    ]
+# Convert date columns
+df["StartDate"] = pd.to_datetime(df["StartDate"], errors="coerce")
+df["Date of Loss"] = pd.to_datetime(df["Date of Loss"], errors="coerce")
 
-    result["priority"] = result[factor_cols].isna().sum(axis=1)
+initial_rows = len(df)
 
-    return float(result.sort_values("priority").iloc[0]["Rate"])
+# Drop missing critical
+df = df.dropna(subset=REQUIRED_COLS)
 
+after_drop_rows = len(df)
 
-# =====================================================
-# SESSION STATE
-# =====================================================
-if "products" not in st.session_state:
-    st.session_state.products = [{}]
-
-if "results" not in st.session_state:
-    st.session_state.results = None
-
-
-# =====================================================
-# INPUT PRODUK (1 ROW PER PRODUK)
-# =====================================================
-st.subheader("Input Produk")
-
-coverage_list = sorted(df_rate["Coverage"].dropna().unique())
-
-for i, p in enumerate(st.session_state.products):
-
-    cols = st.columns([2, 3, 2, 2, 2, 0.5])
-
-    # -------- Coverage --------
-    with cols[0]:
-        p["Coverage"] = st.selectbox(
-            "Coverage" if i == 0 else "",
-            coverage_list,
-            key=f"coverage_{i}"
-        )
-
-    # -------- Subcover --------
-    subcover_options = (
-        df_rate[df_rate["Coverage"] == p["Coverage"]]["Subcover"]
-        .dropna()
-        .unique()
-    )
-
-    with cols[1]:
-        p["Subcover"] = st.selectbox(
-            "Subcover" if i == 0 else "",
-            sorted(subcover_options),
-            key=f"subcover_{i}"
-        )
-
-    # -------- Context-aware factors --------
-    df_filt = df_rate[
-        (df_rate["Coverage"] == p["Coverage"]) &
-        (df_rate["Subcover"] == p["Subcover"])
-    ]
-
-    factor_cols = [
-        c for c in df_filt.columns
-        if c not in ["Coverage", "Subcover", "Rate"]
-        and df_filt[c].dropna().nunique() > 0
-    ]
-
-    factors = {}
-    df_context = df_filt.copy()
-
-    for idx, col in enumerate(factor_cols[:3]):
-        with cols[2 + idx]:
-
-            values = (
-                df_context[col]
-                .dropna()
-                .astype(str)
-                .unique()
-            )
-
-            if len(values) == 0:
-                continue
-
-            selected = st.selectbox(
-                col if i == 0 else "",
-                sorted(values),
-                key=f"{col}_{i}"
-            )
-
-            factors[col] = selected
-
-            # 🔥 context filtering
-            df_context = df_context[
-                (df_context[col].astype(str) == str(selected)) |
-                (df_context[col].isna())
-            ]
-
-    p["Factors"] = factors
-    p["ExpectedFactors"] = factor_cols
-
-    # -------- Delete button --------
-    with cols[5]:
-        if len(st.session_state.products) > 1:
-            if st.button("❌", key=f"del_{i}"):
-                st.session_state.products.pop(i)
-                st.session_state.results = None
-                st.rerun()
-
-
-# =====================================================
-# ADD PRODUCT
-# =====================================================
-if st.button("➕ Tambah Produk"):
-    st.session_state.products.append({})
-    st.session_state.results = None
-    st.rerun()
-
-
-# =====================================================
-# VALIDATION
-# =====================================================
-def validate_products(products):
-    for idx, p in enumerate(products, start=1):
-        expected = p.get("ExpectedFactors", [])
-        filled = p.get("Factors", {})
-
-        if expected and len(filled) < len(expected):
-            return False, f"Produk {idx}: Faktor risiko belum lengkap"
-
-    return True, None
-
-
-# =====================================================
-# HITUNG RATE
-# =====================================================
-if st.button("Hitung Rate"):
-
-    valid, msg = validate_products(st.session_state.products)
-
-    if not valid:
-        st.error(f"❌ {msg}")
+# Fill optional columns
+for col in OPTIONAL_COLS:
+    if col in df.columns:
+        df[col] = df[col].fillna("UNKNOWN")
     else:
-        results = []
-        total_rate = 0
+        df[col] = "UNKNOWN"
 
-        for p in st.session_state.products:
-            rate = get_rate(
-                df_rate,
-                p["Coverage"],
-                p["Subcover"],
-                p["Factors"]
-            )
+# ===============================
+# DEDUPLICATION
+# ===============================
+df = (
+    df
+    .groupby("Nomor klaim", as_index=False)
+    .agg({
+        "StartDate": "min",
+        "Date of Loss": "min",
+        "Claim Amount": "sum",
+        "Cause of Loss": "first",
+        "Kode Okupasi": "first",
+        "Occupancy": "first",
+        "Kategori Risiko": "first"
+    })
+)
 
-            results.append({
-                "Coverage": p["Coverage"],
-                "Subcover": p["Subcover"],
-                **p["Factors"],
-                "Rate (%)": rate * 100
-            })
+after_dedup_rows = len(df)
 
-            total_rate += rate
+# ===============================
+# FEATURE ENGINEERING
+# ===============================
+df["Loss Lag Days"] = (df["Date of Loss"] - df["StartDate"]).dt.days
+df["Loss Lag Months"] = df["Loss Lag Days"] / 30
 
-        st.session_state.results = (results, total_rate)
+def loss_bucket(x):
+    if x <= 3:
+        return "0–3 bulan"
+    elif x <= 6:
+        return ">3–6 bulan"
+    elif x <= 12:
+        return ">6–12 bulan"
+    elif x <= 24:
+        return ">12–24 bulan"
+    else:
+        return ">24 bulan"
 
+df["Loss Timing Bucket"] = df["Loss Lag Months"].apply(loss_bucket)
 
-# =====================================================
-# OUTPUT
-# =====================================================
-if st.session_state.results:
+# ===============================
+# DATA QUALITY SUMMARY
+# ===============================
+st.subheader("⚠️ Data Quality Summary")
+col1, col2, col3 = st.columns(3)
+col1.metric("Total Baris Awal", initial_rows)
+col2.metric("Baris Setelah Cleaning", after_drop_rows)
+col3.metric("Klaim Unik (Final)", after_dedup_rows)
 
-    results, total_rate = st.session_state.results
+# ===============================
+# FILTERS
+# ===============================
+st.sidebar.header("🔍 Filter Data")
 
-    st.subheader("Bundling Product")
+filter_okupasi = st.sidebar.multiselect(
+    "Kode Okupasi",
+    sorted(df["Kode Okupasi"].unique()),
+    default=df["Kode Okupasi"].unique()
+)
 
-    df_out = pd.DataFrame(results)
-    df_out.insert(0, "No", range(1, len(df_out) + 1))
+filter_occupancy = st.sidebar.multiselect(
+    "Occupancy",
+    sorted(df["Occupancy"].unique()),
+    default=df["Occupancy"].unique()
+)
 
-    df_out["Rate (%)"] = df_out["Rate (%)"].map(lambda x: f"{x:.4f}%")
+filter_risk = st.sidebar.multiselect(
+    "Kategori Risiko",
+    sorted(df["Kategori Risiko"].unique()),
+    default=df["Kategori Risiko"].unique()
+)
 
-    st.dataframe(df_out, use_container_width=True, hide_index=True)
+df_f = df[
+    (df["Kode Okupasi"].isin(filter_okupasi)) &
+    (df["Occupancy"].isin(filter_occupancy)) &
+    (df["Kategori Risiko"].isin(filter_risk))
+]
 
-    st.success(
-        f"✅ **Total Bundling Rate: {total_rate * 100:.4f}%**"
-    )
+# ===============================
+# DASHBOARD
+# ===============================
+st.subheader("📈 Loss Timing Analysis")
 
-    st.warning(
-        """
-        **Catatan:**
-        1. Maksimum akuisisi adalah **20%**, kecuali terdapat ketentuan dari **Regulator**.
-        2. Untuk pemberian **rate di bawah rate acuan**, dapat dilakukan **perhitungan profitability checking**.
-        """
-    )
+col1, col2 = st.columns(2)
+
+# Frequency by loss timing
+freq = (
+    df_f
+    .groupby("Loss Timing Bucket")
+    .size()
+    .reset_index(name="Frekuensi Klaim")
+)
+
+fig_freq = px.bar(
+    freq,
+    x="Loss Timing Bucket",
+    y="Frekuensi Klaim",
+    title="Frekuensi Klaim berdasarkan Loss Timing"
+)
+
+col1.plotly_chart(fig_freq, use_container_width=True)
+
+# Amount by loss timing
+amt = (
+    df_f
+    .groupby("Loss Timing Bucket")["Claim Amount"]
+    .sum()
+    .reset_index()
+)
+
+fig_amt = px.bar(
+    amt,
+    x="Loss Timing Bucket",
+    y="Claim Amount",
+    title="Amount Klaim berdasarkan Loss Timing"
+)
+
+col2.plotly_chart(fig_amt, use_container_width=True)
+
+# ===============================
+# CAUSE OF LOSS CONTRIBUTION
+# ===============================
+st.subheader("🎯 Cause of Loss Contribution")
+
+col3, col4 = st.columns(2)
+
+# Frequency contribution
+cause_freq = (
+    df_f
+    .groupby("Cause of Loss")
+    .size()
+    .reset_index(name="Frekuensi")
+)
+
+cause_freq["% Kontribusi"] = cause_freq["Frekuensi"] / cause_freq["Frekuensi"].sum() * 100
+
+fig_cf = px.pie(
+    cause_freq,
+    names="Cause of Loss",
+    values="% Kontribusi",
+    title="% Kontribusi Frekuensi by Cause of Loss"
+)
+
+col3.plotly_chart(fig_cf, use_container_width=True)
+
+# Amount contribution
+cause_amt = (
+    df_f
+    .groupby("Cause of Loss")["Claim Amount"]
+    .sum()
+    .reset_index()
+)
+
+cause_amt["% Kontribusi"] = cause_amt["Claim Amount"] / cause_amt["Claim Amount"].sum() * 100
+
+fig_ca = px.pie(
+    cause_amt,
+    names="Cause of Loss",
+    values="% Kontribusi",
+    title="% Kontribusi Amount by Cause of Loss"
+)
+
+col4.plotly_chart(fig_ca, use_container_width=True)
+
+# ===============================
+# FINAL TABLE
+# ===============================
+st.subheader("📋 Data Klaim Final (Setelah Cleaning)")
+st.dataframe(df_f)
